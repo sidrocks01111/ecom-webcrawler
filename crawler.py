@@ -10,6 +10,7 @@ from queue import Queue
 
 from validators import Validator
 from utility import *
+from dynamic_content import DynamicContentHandler
 
 R = '\033[31m'  
 G = '\033[32m'  
@@ -24,14 +25,15 @@ logging.basicConfig(
 
 
 class Crawler:
-    def __init__(self, urls, crawl_helper: CrawlerHelper, max_depth=3, max_threads=10):
+    def __init__(self, urls, max_depth=3, max_threads=10):
         self.visited_urls = set()
         self.urls_queue = Queue()
         self.initialise_queue(urls)
-        self.crawl_helper = crawl_helper
         self.max_depth = max_depth
         self.max_threads = max_threads
         self.client = httpx.AsyncClient(verify=False,limits=httpx.Limits(max_keepalive_connections=5, max_connections=10))
+        self.crawl_helper = CrawlerHelper()
+        self.dynamic_content_handler = DynamicContentHandler()
 
     def initialise_queue(self, urls):
         for url in urls:
@@ -46,7 +48,7 @@ class Crawler:
         for link in soup.find_all('a'):
             path = link.get('href')
             if path and not path.startswith(('#', 'javascript:', 'mailto:')):
-                if self.crawl_helper.is_product_url(url):
+                if self.crawl_helper.is_product_url(url, soup):
                     match = re.search(r'^.*?\.[a-zA-Z0-9]+', path)
                     if match:
                         domain_url = match.group(0)
@@ -64,11 +66,16 @@ class Crawler:
             logging.warning(f"Skipping invalid URL: {url}")
             return
         html = await self.download_url(url)
-        if html is None:
-            self.crawl_helper.handle_dynamic_content(url)
         for linked_url in self.get_linked_urls(url, html):
             self.add_url_to_visit(linked_url, depth + 1)
-
+    
+    async def crawl_dynamic(self, url, depth):
+        try:
+            urls_dynamic = await self.dynamic_content_handler.crawl_dynamic_content(url)
+            for dynamic_url in urls_dynamic:
+                self.add_url_to_visit(dynamic_url, depth + 1)
+        except Exception as e:
+            logging.exception(f'{R}Failed to crawl dynamic content: {url} - {e}{W}')
         
     async def process_url(self, url, depth):
         if url is None:
@@ -76,6 +83,7 @@ class Crawler:
         logging.info(f'{C}Crawling: {url} (Depth: {depth}){W}')
         try:
             await self.crawl(url, depth)
+            await self.crawl_dynamic(url, depth)
         except httpx.RequestError as e:
             logging.error(f'{R}Failed to crawl: {url} - {e}{W}')
         except Exception as e:
@@ -100,6 +108,5 @@ if __name__ == '__main__':
     max_depth = int(input("Enter Max depth: "))
     max_threads = int(input("Enter Max threads: "))
     urls = urls_to_scrape.split(",")
-    crawl_helper = CrawlerHelper()
-    crawler = Crawler(urls, crawl_helper, max_depth=max_depth, max_threads=max_threads)
+    crawler = Crawler(urls, max_depth=5, max_threads=1)
     asyncio.run(crawler.run())
